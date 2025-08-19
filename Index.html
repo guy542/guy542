@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Annuaire des mairies — APK</title>
+  <meta name="theme-color" content="#2563eb" />
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png" sizes="192x192">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/@geoman-io/leaflet-geoman-free@2.13.1/dist/leaflet-geoman.css" />
+  <style>
+    :root { --brand:#2563eb; --dark:#111827; --bg:#f8fafc; }
+    * { box-sizing: border-box; }
+    html, body { height:100%; margin:0; background:var(--bg); font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, 'Helvetica Neue', Arial; }
+    header { position:sticky; top:0; z-index:1000; background:white; padding:10px; border-bottom:1px solid #e5e7eb; }
+    .bar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .bar h1 { font-size:16px; margin:0; font-weight:600; }
+    .pill { padding:6px 10px; background:#eef2ff; border-radius:999px; font-size:12px; }
+    input, button { height:38px; border-radius:10px; border:1px solid #e5e7eb; padding:0 12px; font-size:14px; }
+    button.brand { background:var(--brand); color:white; border:none; }
+    button.dark { background:var(--dark); color:white; border:none; }
+    .toggle { display:inline-flex; align-items:center; gap:6px; font-size:13px; }
+    #map { width:100%; height:55vh; }
+    #panel { background:white; border-top:1px solid #e5e7eb; }
+    #panel .head { display:flex; justify-content:space-between; align-items:center; padding:10px 12px; position:sticky; top:0; background:white; border-bottom:1px solid #e5e7eb; z-index:5; }
+    #status { font-size:12px; color:#374151; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th, td { padding:8px; border-bottom:1px solid #f1f5f9; vertical-align:top; }
+    th { text-align:left; position:sticky; top:42px; background:white; z-index:4; }
+    .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size:12px; color:#6b7280; }
+    .muted { color:#6b7280; }
+    .row-actions { display:flex; gap:8px; flex-wrap:wrap; }
+    .note { font-size:12px; color:#6b7280; }
+    .layer-note { font-size:12px; color:#6b7280; margin-left:6px; }
+    .sec { padding:10px 12px; border-top:1px solid #eef2ff; background:#ffffff; }
+    .sec h2 { margin:0 0 6px; font-size:14px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="bar">
+      <h1>Annuaire des mairies — APK</h1>
+      <span class="pill" id="count">0 commune</span>
+      <label class="toggle"><input type="checkbox" id="modeEco" checked> Mode Éco</label>
+      <button id="btnEnrich" class="dark">Enrichir (maires + contacts)</button>
+      <button id="btnCSV" class="dark">Exporter CSV</button>
+    </div>
+    <div class="bar" style="margin-top:8px;">
+      <input id="dept" inputmode="numeric" pattern="[0-9]*" placeholder="Code département (ex : 59)" style="flex:0 0 180px" />
+      <button id="btnDept" class="brand">Charger département</button>
+      <button id="btnDrawHelp">Dessin Rect/Polygone</button>
+      <button id="btnFitFr">Recentrer France</button>
+    </div>
+    <div class="bar" style="margin-top:8px;">
+      <input id="codeCanton" placeholder="Code canton (optionnel)" style="flex:0 0 180px" />
+      <button id="btnCanton">Charger canton</button>
+      <label class="toggle">
+        <input type="checkbox" id="toggleCirco"> Circonscriptions (carte)
+      </label>
+      <span class="layer-note" id="circoNote">désactivé (économe)</span>
+    </div>
+  </header>
+
+  <div id="map"></div>
+
+  <section id="panel">
+    <div class="head">
+      <div id="status">Prêt.</div>
+      <div class="row-actions">
+        <button id="btnClear">Effacer</button>
+      </div>
+    </div>
+    <div class="sec">
+      <h2>Conseils éco</h2>
+      <div class="note">Par défaut, seule la carte OSM et la recherche de communes sont chargées. Active les circonscriptions uniquement si nécessaire (couche plus lourde).</div>
+    </div>
+    <div style="overflow:auto; max-height: 38vh;">
+      <table id="tbl">
+        <thead>
+          <tr>
+            <th>Commune</th>
+            <th>INSEE</th>
+            <th>Département</th>
+            <th>CP</th>
+            <th>Maire (début, nuance)</th>
+            <th>Contact mairie</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <script>
+    // Service worker (utile en PWA ; ignoré dans l'APK mais sans danger)
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./service-worker.js').catch(()=>{});
+      });
+    }
+  </script>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/@geoman-io/leaflet-geoman-free@2.13.1/dist/leaflet-geoman.min.js"></script>
+  <script>
+    const fmt = (v)=> v==null ? '—' : String(v);
+    const el = (sel)=>document.querySelector(sel);
+    const tbody = el('#tbl tbody');
+    const status = el('#status');
+    const count = el('#count');
+    const modeEco = el('#modeEco');
+
+    const map = L.map('map', { zoomControl: false }).setView([46.6, 2.2], 6);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 18,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+    L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+    // Outils de dessin (rectangle/polygone)
+    map.pm.addControls({
+      position: 'topleft',
+      drawCircle: false, drawPolyline: false, drawMarker: false,
+      drawCircleMarker: false, drawText: false,
+      drawPolygon: true, drawRectangle: true,
+      editMode: true, dragMode: false, cutPolygon: false, rotateMode: false, removalMode: true,
+    });
+
+    let shapeLayer = null;       // zone dessinée
+    let rows = [];               // communes affichées
+    let circoLayer = null;
+
+    function setRows(list){
+      rows = list;
+      tbody.innerHTML = '';
+      for(const r of rows){
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td><strong>${fmt(r.nom)}</strong></td>
+          <td class="mono">${fmt(r.code)}</td>
+          <td>${fmt(r.codeDepartement)}</td>
+          <td>${fmt((r.codesPostaux||[]).join(', '))}</td>
+          <td class="muted">
+            ${r.maire?.nom ? '<div><strong>'+r.maire.nom+'</strong></div>' : ''}
+            ${r.maire ? '<div>Début : '+fmt(r.maire.date_debut_mandat)+' · Nuance : '+fmt(r.maire.nuance)+'</div>' : '—'}
+          </td>
+          <td class="muted">
+            ${r.contact?.label ? '<div><strong>'+r.contact.label+'</strong></div>' : ''}
+            ${r.contact?.adresse ? '<div>'+r.contact.adresse+'</div>' : ''}
+            ${r.contact?.telephone ? '<div>☎ '+r.contact.telephone+'</div>' : ''}
+            ${r.contact?.email ? '<div>✉ '+r.contact.email+'</div>' : ''}
+            ${r.contact?.site ? '<div><a href="'+r.contact.site+'" target="_blank" rel="noreferrer">Site web</a></div>' : ''}
+          </td>
+        `;
+        tbody.appendChild(tr);
+      }
+      count.textContent = rows.length + (rows.length>1 ? ' communes' : ' commune');
+    }
+
+    // === Géométrie : test point-dans-polygone (ray casting)
+    function pointInPolygon(lng, lat, ringLngLat){
+      let inside = false;
+      for(let i=0, j=ringLngLat.length-1; i<ringLngLat.length; j=i++){
+        const xi = ringLngLat[i][0], yi = ringLngLat[i][1];
+        const xj = ringLngLat[j][0], yj = ringLngLat[j][1];
+        const intersect = ((yi>lat)!=(yj>lat)) && (lng < (xj-xi)*(lat-yi)/(yj-yi)+xi);
+        if(intersect) inside = !inside;
+      }
+      return inside;
+    }
+    function isInsideShape(lng, lat){
+      if(!shapeLayer) return true;
+      const rings = shapeLayer.getLatLngs();
+      // rectangles = un anneau ; polygones = peut être multipolygone -> on teste le 1er
+      const ring = (Array.isArray(rings[0]) ? rings[0] : rings).map(ll => [ll.lng, ll.lat]);
+      return pointInPolygon(lng, lat, ring);
+    }
+    function filterListByShape(list){
+      if(!shapeLayer) return list;
+      return list.filter(c=>{
+        const p = c?.centre?.coordinates; // GeoJSON [lng,lat]
+        if(!p) return false;
+        return isInsideShape(p[0], p[1]);
+      });
+    }
+
+    // === APIS
+    async function fetchCommunesByBBox(bbox){
+      const url = new URL('https://geo.api.gouv.fr/communes');
+      url.searchParams.set('bbox', bbox.join(','));
+      url.searchParams.set('fields', 'nom,code,codeDepartement,codesPostaux,centre');
+      url.searchParams.set('format', 'json');
+      url.searchParams.set('geometry', 'centre');
+      const res = await fetch(url.toString());
+      if(!res.ok) throw new Error('Échec API communes: '+res.status);
+      return res.json();
+    }
+    async function fetchCommunesByDept(codeDept){
+      const url = new URL('https://geo.api.gouv.fr/communes');
+      url.searchParams.set('codeDepartement', codeDept);
+      url.searchParams.set('fields', 'nom,code,codeDepartement,codesPostaux,centre');
+      url.searchParams.set('format', 'json');
+      const res = await fetch(url.toString());
+      if(!res.ok) throw new Error('Échec API communes par département: '+res.status);
+      return res.json();
+    }
+    async function fetchCommunesByCanton(codeCanton){
+      const url = new URL('https://geo.api.gouv.fr/communes');
+      url.searchParams.set('codeCanton', codeCanton);
+      url.searchParams.set('fields', 'nom,code,codeDepartement,codesPostaux,centre');
+      url.searchParams.set('format', 'json');
+      const res = await fetch(url.toString());
+      if(!res.ok) throw new Error('Échec API communes par canton: '+res.status);
+      return res.json();
+    }
+    async function fetchMaireFromRNE(codeInsee){
+      const base = 'https://public.opendatasoft.com/api/explore/v2.1/catalog/datasets/donnees-du-repertoire-national-des-elus/records';
+      const where = `code_commune='${codeInsee}' AND (libelle='Maire' OR libelle LIKE '%Maire%')`;
+      const url = base + '?' + new URLSearchParams({ limit:'3', where }).toString();
+      const res = await fetch(url);
+      if(!res.ok) throw new Error('Échec API RNE: '+res.status);
+      const data = await res.json();
+      const r = (data?.results||[])[0];
+      if(!r) return null;
+      return {
+        nom: [r.prenom, r.nom].filter(Boolean).join(' '),
+        libelle: r.libelle,
+        date_debut_mandat: r.date_debut_mandat || r.date_debut_mandature || null,
+        nuance: r.nuance_politique || r.nuance || null,
+        profession: r.profession || null,
+      };
+    }
+    async function fetchMairieContact(communeNom, codePostal){
+      const base = 'https://public.opendatasoft.com/api/explore/v2.1/catalog/datasets/annuaire-de-ladministration-base-de-donnees-locales/records';
+      const safeCommune = communeNom.replace(/'/g,' ');
+      const where = `search(label, 'mairie') AND search(commune, '${safeCommune}')` + (codePostal ? ` AND code_postal='${codePostal}'` : '');
+      const url = base + '?' + new URLSearchParams({ limit:'10', where }).toString();
+      const res = await fetch(url);
+      if(!res.ok) throw new Error('Échec API Annuaire: '+res.status);
+      const data = await res.json();
+      const first = (data?.results||[]).find(r => /mairie/i.test(r?.label || r?.nom || ''));
+      if(!first) return null;
+      const adr = [first.numero_voie, first.type_voie, first.nom_voie, first.code_postal, first.commune].filter(Boolean).join(' ');
+      return {
+        label: first.label || first.nom || 'Mairie',
+        adresse: adr || null,
+        telephone: first.telephone || first.tel || null,
+        email: first.email || first.courriel || null,
+        site: first.site || first.url || null,
+      };
+    }
+
+    // === Flux : dessiner → récupérer bbox → charger communes → filtrer par polygone
+    function boundsToBBox(bounds){
+      return [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()];
+    }
+    async function refreshFromShape(){
+      if(!shapeLayer){ setRows([]); return; }
+      const gj = shapeLayer.toGeoJSON();
+      const bounds = L.geoJSON(gj).getBounds();
+      const bbox = boundsToBBox(bounds);
+      status.textContent = 'Recherche de communes dans la zone…';
+      try{
+        const raw = await fetchCommunesByBBox(bbox);
+        const filtered = filterListByShape(raw);
+        setRows(filtered);
+        status.textContent = 'Communes chargées (filtrées par polygone).';
+      }catch(err){
+        status.textContent = 'Erreur: '+err.message;
+      }
+    }
+
+    map.on('pm:create', (e)=>{
+      if(shapeLayer){ try{ map.removeLayer(shapeLayer); }catch{} }
+      shapeLayer = e.layer;
+      refreshFromShape();
+    });
+    map.on('pm:remove', ()=>{
+      shapeLayer = null; setRows([]); status.textContent='Prêt.';
+    });
+    map.on('pm:edit', ()=>{
+      if(!shapeLayer) return;
+      status.textContent = 'Mise à jour…';
+      refreshFromShape();
+    });
+
+    // === Enrichissement
+    async function enrichAll(maxConcurrency=4){
+      if(rows.length===0){ alert('Aucune commune chargée.'); return; }
+      if(modeEco.checked){
+        if(!confirm('Tu es en Mode Éco. Confirmer l’enrichissement (appels externes) ?')) return;
+      }
+      status.textContent = 'Enrichissement en cours… (0/'+rows.length+')';
+      let done = 0;
+      const out = Array.from(rows);
+      let i = 0;
+      const workers = Array.from({length:Math.min(maxConcurrency, rows.length)}).map(async ()=>{
+        while(i < rows.length){
+          const idx = i++;
+          const c = out[idx];
+          try{
+            const cp = (c.codesPostaux && c.codesPostaux[0]) || null;
+            const [maire, contact] = await Promise.allSettled([
+              fetchMaireFromRNE(c.code),
+              fetchMairieContact(c.nom, cp)
+            ]);
+            c.maire = (maire.status==='fulfilled') ? maire.value : null;
+            c.contact = (contact.status==='fulfilled') ? contact.value : null;
+          }catch(e){}
+          finally{
+            done++; if(done%3===0){ status.textContent = `Enrichissement… (${done}/${rows.length})`; }
+          }
+          await new Promise(r=>setTimeout(r,60));
+        }
+      });
+      await Promise.all(workers);
+      setRows(out);
+      status.textContent = 'Terminé.';
+    }
+
+    function exportCSV(){
+      if(rows.length===0){ alert('Aucune donnée à exporter'); return; }
+      const header = [
+        'Commune','INSEE','Département','Codes postaux',
+        'Maire','Début mandat','Nuance politique','Profession',
+        'Adresse mairie','Téléphone','Email','Site'
+      ];
+      const lines = [header.join(';')];
+      for(const r of rows){
+        const vals = [
+          r.nom || '', r.code || '', r.codeDepartement || '', (r.codesPostaux||[]).join('|'),
+          (r.maire?.nom||''), (r.maire?.date_debut_mandat||''), (r.maire?.nuance||''), (r.maire?.profession||''),
+          (r.contact?.adresse||''), (r.contact?.telephone||''), (r.contact?.email||''), (r.contact?.site||'')
+        ].map(v => '\"' + String(v).replace(/\"/g,'\"\"') + '\"');
+        lines.push(vals.join(';'));
+      }
+      const blob = new Blob([lines.join('\n')], { type:'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'mairies_selection.csv';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    // === UI divers
+    document.querySelector('#btnEnrich').addEventListener('click', ()=>enrichAll());
+    document.querySelector('#btnCSV').addEventListener('click', exportCSV);
+    document.querySelector('#btnClear').addEventListener('click', ()=>{ if(shapeLayer){ map.removeLayer(shapeLayer); } shapeLayer=null; setRows([]); status.textContent='Prêt.'; });
+    document.querySelector('#btnFitFr').addEventListener('click', ()=> map.fitBounds([[41,-5.5],[51.5,9.5]]));
+    document.querySelector('#btnDrawHelp').addEventListener('click', ()=> alert('Utilise les boutons en haut à gauche : Rectangle ou Polygone pour dessiner ta zone (tactile ok).'));
+
+    document.querySelector('#btnDept').addEventListener('click', async ()=>{
+      const v = document.querySelector('#dept').value.trim();
+      if(!v){ alert('Saisis un code département (ex: 59)'); return; }
+      status.textContent = 'Chargement des communes du département '+v+'…';
+      try{
+        const list = await fetchCommunesByDept(v);
+        // Si une zone est dessinée, on filtre quand même par la zone
+        const filtered = filterListByShape(list);
+        setRows(filtered);
+        status.textContent = 'Communes chargées pour le département '+v+' (filtrées si zone active).';
+      }catch(e){
+        status.textContent = 'Erreur: '+e.message;
+      }
+    });
+    document.querySelector('#btnCanton').addEventListener('click', async ()=>{
+      const c = document.querySelector('#codeCanton').value.trim();
+      if(!c){ alert('Saisis un code canton'); return; }
+      status.textContent = 'Chargement des communes du canton '+c+'…';
+      try{
+        const list = await fetchCommunesByCanton(c);
+        const filtered = filterListByShape(list);
+        setRows(filtered);
+        status.textContent = 'Communes chargées pour le canton '+c+' (filtrées si zone active).';
+      }catch(e){
+        status.textContent = 'Erreur: '+e.message;
+      }
+    });
+
+    async function loadCirconscriptions(){
+      if(circoLayer){ map.removeLayer(circoLayer); circoLayer=null; }
+      status.textContent = 'Chargement des circonscriptions (peut prendre du temps)…';
+      try{
+        const url = 'https://raw.githubusercontent.com/gregoiredavid/france-geojson/master/legislatives-circonscriptions.json';
+        const res = await fetch(url, { cache:'reload' });
+        if(!res.ok) throw new Error('Téléchargement circonscriptions: '+res.status);
+        const gj = await res.json();
+        circoLayer = L.geoJSON(gj, { style: { color:'#2563eb', weight:1, fillOpacity:0.05 } }).addTo(map);
+        status.textContent = 'Circonscriptions chargées. Touchez une zone pour lister ses communes (approx. via bbox puis filtrage).';
+        circoLayer.on('click', async (ev)=>{
+          const b = ev.layer.getBounds();
+          const bbox = boundsToBBox(b);
+          status.textContent = 'Recherche de communes dans la circonscription…';
+          const list = await fetchCommunesByBBox(bbox);
+          // Filtrer par le polygone cliqué : on reconstruit un ring grossier depuis les bounds — approximation
+          // Pour précision, invite l’utilisateur à dessiner sa propre zone sur la circo.
+          setRows(list);
+          status.textContent = 'Communes chargées (approximation région circo). Pour précision, dessine la zone.';
+        });
+      }catch(e){
+        status.textContent = 'Erreur circonscriptions: '+e.message;
+      }
+    }
+    document.querySelector('#toggleCirco').addEventListener('change', (ev)=>{
+      const active = ev.target.checked;
+      document.querySelector('#circoNote').textContent = active ? 'activé' : 'désactivé (économe)';
+      if(active){ loadCirconscriptions(); } else { if(circoLayer){ map.removeLayer(circoLayer); circoLayer=null; } }
+    });
+
+    // Vue initiale
+    map.fitBounds([[41,-5.5],[51.5,9.5]]);
+  </script>
+</body>
+</html>
